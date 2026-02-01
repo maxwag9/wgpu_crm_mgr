@@ -1,4 +1,4 @@
-# wgpu-crm-mgr
+# wgpu_crm_mgr
 
 An easy way to use wgpu without layout, pipeline and bindgroup hell. Cached and lightweight.
 Cache-driven render and compute manager for `wgpu`.
