@@ -275,7 +275,79 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(v, v, v, 1.0);
 }
 "#;
+const FULLSCREEN_COLOR_UNFILTERABLE_SHADER: &str = r#"
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
 
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    var uvs = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+    );
+    var out: VertexOutput;
+    out.position = vec4<f32>(positions[idx], 0.0, 1.0);
+    out.uv = uvs[idx];
+    return out;
+}
+
+@group(0) @binding(0) var t_tex: texture_2d<f32>;
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let dims = textureDimensions(t_tex);
+    let coord = vec2<i32>(in.uv * vec2<f32>(dims));
+    return textureLoad(t_tex, coord, 0);
+}
+"#;
+
+const FULLSCREEN_RED_TO_GRAYSCALE_UNFILTERABLE_SHADER: &str = r#"
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    var uvs = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+    );
+    var out: VertexOutput;
+    out.position = vec4<f32>(positions[idx], 0.0, 1.0);
+    out.uv = uvs[idx];
+    return out;
+}
+
+@group(0) @binding(0) var t_tex: texture_2d<f32>;
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let dims = textureDimensions(t_tex);
+    let coord = vec2<i32>(in.uv * vec2<f32>(dims));
+    let c = textureLoad(t_tex, coord, 0);
+    let v = c.r;
+    return vec4<f32>(v, v, v, 1.0);
+}
+"#;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct DepthDebugParams {
@@ -323,13 +395,17 @@ impl PipelineKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct PipelineKey {
     kind: PipelineKind,
-    target_format: TextureFormat
+    target_format: TextureFormat,
+    source_is_msaa: bool,
+    source_is_filterable: bool,
+    target_sample_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct BindGroupKey {
     view_ptr: usize,
     kind: PipelineKind,
+    is_filterable: bool,
 }
 
 /// Renders textures to fullscreen quads for debugging and visualization.
@@ -338,13 +414,16 @@ pub struct FullscreenRenderer {
     queue: Queue,
 
     color_shader: ShaderModule,
+    color_unfilterable_shader: ShaderModule,
     color_msaa_shader: ShaderModule,
     red_to_grayscale_shader: ShaderModule,
+    red_to_grayscale_unfilterable_shader: ShaderModule,
     red_to_grayscale_msaa_shader: ShaderModule,
     depth_shader: ShaderModule,
     depth_msaa_shader: ShaderModule,
 
     color_bgl: BindGroupLayout,
+    color_unfilterable_bgl: BindGroupLayout,
     color_msaa_bgl: BindGroupLayout,
     depth_bgl: BindGroupLayout,
     depth_msaa_bgl: BindGroupLayout,
@@ -358,8 +437,6 @@ pub struct FullscreenRenderer {
 
     depth_params_buffer: Option<Buffer>,
     depth_params_bind_group: Option<BindGroup>,
-
-
 }
 
 impl FullscreenRenderer {
@@ -381,6 +458,10 @@ impl FullscreenRenderer {
             label: Some("fullscreen color shader"),
             source: ShaderSource::Wgsl(FULLSCREEN_COLOR_SHADER.into()),
         });
+        let color_unfilterable_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("fullscreen color unfilterable shader"),
+            source: ShaderSource::Wgsl(FULLSCREEN_COLOR_UNFILTERABLE_SHADER.into()),
+        });
         let color_msaa_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("fullscreen color MSAA shader"),
             source: ShaderSource::Wgsl(FULLSCREEN_COLOR_MSAA_SHADER.into()),
@@ -388,6 +469,10 @@ impl FullscreenRenderer {
         let red_to_grayscale_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("fullscreen grayscale shader"),
             source: ShaderSource::Wgsl(FULLSCREEN_RED_TO_GRAYSCALE_SHADER.into()),
+        });
+        let red_to_grayscale_unfilterable_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("fullscreen grayscale unfilterable shader"),
+            source: ShaderSource::Wgsl(FULLSCREEN_RED_TO_GRAYSCALE_UNFILTERABLE_SHADER.into()),
         });
         let red_to_grayscale_msaa_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("fullscreen grayscale shader"),
@@ -415,6 +500,22 @@ impl FullscreenRenderer {
                     visibility: ShaderStages::FRAGMENT,
                     ty: BindingType::Texture {
                         sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let color_unfilterable_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("fullscreen color unfilterable bgl"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: false },
                         view_dimension: TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -494,12 +595,15 @@ impl FullscreenRenderer {
             device,
             queue,
             color_shader,
+            color_unfilterable_shader,
             color_msaa_shader,
             red_to_grayscale_shader,
+            red_to_grayscale_unfilterable_shader,
             red_to_grayscale_msaa_shader,
             depth_shader,
             depth_msaa_shader,
             color_bgl,
+            color_unfilterable_bgl,
             color_msaa_bgl,
             depth_bgl,
             depth_msaa_bgl,
@@ -560,12 +664,27 @@ impl FullscreenRenderer {
         target_view: &TextureView,
         pass: &mut RenderPass,
     ) {
-        let kind = PipelineKind::from_debug_visualization(visualization_type);
+        let binding_type = infer_texture_binding_type(texture, &self.device, None);
+        let sample_type = match binding_type {
+            BindingType::Texture { sample_type, .. } => sample_type,
+            _ => unreachable!("infer_texture_binding_type always returns BindingType::Texture"),
+        };
+
+        let kind = if matches!(sample_type, TextureSampleType::Depth) {
+            PipelineKind::Depth
+        } else {
+            PipelineKind::from_debug_visualization(visualization_type)
+        };
+
+        let is_filterable = matches!(sample_type, TextureSampleType::Float { filterable: true });
+
         let pipeline_msaa_samples = target_view.texture().sample_count();
         let target_format = target_view.texture().format();
-        let pipeline = self.get_or_create_pipeline(texture, kind, target_format, pipeline_msaa_samples);
+
+        let pipeline = self.get_or_create_pipeline(texture, kind, target_format, pipeline_msaa_samples, is_filterable);
         pass.set_pipeline(pipeline);
-        let bind_group = self.get_or_create_bind_group(texture, kind);
+
+        let bind_group = self.get_or_create_bind_group(texture, kind, is_filterable);
         pass.set_bind_group(0, bind_group, &[]);
 
         if kind == PipelineKind::Depth {
@@ -611,12 +730,20 @@ impl FullscreenRenderer {
         texture: &TextureView,
         kind: PipelineKind,
         target_format: TextureFormat,
-        pipeline_msaa_samples: u32
+        target_sample_count: u32,
+        is_filterable: bool,
     ) -> &RenderPipeline {
-        let key = PipelineKey { kind, target_format };
+        let source_is_msaa = texture.texture().sample_count() > 1;
+        let key = PipelineKey {
+            kind,
+            target_format,
+            source_is_msaa,
+            source_is_filterable: is_filterable,
+            target_sample_count,
+        };
 
         if !self.pipelines.contains_key(&key) {
-            let pipeline = self.create_pipeline(texture, kind, target_format, pipeline_msaa_samples);
+            let pipeline = self.create_pipeline(kind, target_format, target_sample_count, source_is_msaa, is_filterable);
             self.pipelines.insert(key, pipeline);
         }
 
@@ -625,24 +752,36 @@ impl FullscreenRenderer {
 
     fn create_pipeline(
         &self,
-        texture: &TextureView,
         kind: PipelineKind,
         target_format: TextureFormat,
-        pipeline_msaa_samples: u32
+        pipeline_msaa_samples: u32,
+        source_is_msaa: bool,
+        is_filterable: bool,
     ) -> RenderPipeline {
-        let is_msaa = texture.texture().sample_count() > 1;
-        let (shader, bgl) = match (kind, is_msaa) {
-            (PipelineKind::Color, false) => (&self.color_shader, &self.color_bgl),
-            (PipelineKind::Color, true)  => (&self.color_msaa_shader, &self.color_msaa_bgl),
+        let (shader, bgl) = match (kind, source_is_msaa, is_filterable) {
+            // MSAA sources always use MSAA shaders (they use textureLoad)
+            (PipelineKind::Color, true, _) => (&self.color_msaa_shader, &self.color_msaa_bgl),
+            (PipelineKind::RedToGrayscale, true, _) => (&self.red_to_grayscale_msaa_shader, &self.color_msaa_bgl),
+            (PipelineKind::Depth, true, _) => (&self.depth_msaa_shader, &self.depth_msaa_bgl),
 
-            (PipelineKind::RedToGrayscale, false) => (&self.red_to_grayscale_shader, &self.color_bgl),
-            (PipelineKind::RedToGrayscale, true)  => (&self.red_to_grayscale_msaa_shader, &self.color_msaa_bgl),
+            // Non-MSAA filterable float textures use sampler-based shaders
+            (PipelineKind::Color, false, true) => (&self.color_shader, &self.color_bgl),
+            (PipelineKind::RedToGrayscale, false, true) => (&self.red_to_grayscale_shader, &self.color_bgl),
 
-            (PipelineKind::Depth, false) => (&self.depth_shader, &self.depth_bgl),
-            (PipelineKind::Depth, true)  => (&self.depth_msaa_shader, &self.depth_msaa_bgl),
+            // Non-MSAA non-filterable float textures use textureLoad shaders
+            (PipelineKind::Color, false, false) => (&self.color_unfilterable_shader, &self.color_unfilterable_bgl),
+            (PipelineKind::RedToGrayscale, false, false) => (&self.red_to_grayscale_unfilterable_shader, &self.color_unfilterable_bgl),
+
+            // Depth textures (non-MSAA) use their own sampler-based shader
+            (PipelineKind::Depth, false, _) => (&self.depth_shader, &self.depth_bgl),
         };
 
-        let bind_group_layouts: Vec<&BindGroupLayout> = if kind == PipelineKind::Depth { vec![bgl, &self.depth_params_bgl] } else { vec![bgl] };
+        let bind_group_layouts: Vec<&BindGroupLayout> = if kind == PipelineKind::Depth {
+            vec![bgl, &self.depth_params_bgl]
+        } else {
+            vec![bgl]
+        };
+
         let layout = self.device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("fullscreen pipeline layout"),
             bind_group_layouts: &bind_group_layouts,
@@ -683,50 +822,125 @@ impl FullscreenRenderer {
         })
     }
 
-    fn get_or_create_bind_group(&mut self, view: &TextureView, kind: PipelineKind) -> &BindGroup {
+    fn get_or_create_bind_group(
+        &mut self,
+        view: &TextureView,
+        kind: PipelineKind,
+        is_filterable: bool,
+    ) -> &BindGroup {
         let key = BindGroupKey {
             view_ptr: view as *const TextureView as usize,
             kind,
+            is_filterable,
         };
-        let is_msaa = view.texture().sample_count() > 1;
-        if !self.bind_groups.contains_key(&key) {
-            let (layout, sampler) = match (kind, is_msaa) {
-                (PipelineKind::Color | PipelineKind::RedToGrayscale, false) => (&self.color_bgl, Some(&self.linear_sampler)),
-                (PipelineKind::Color | PipelineKind::RedToGrayscale, true) => (&self.color_msaa_bgl, None),
-                (PipelineKind::Depth, false) => (&self.depth_bgl, Some(&self.nearest_sampler)),
-                (PipelineKind::Depth, true) => (&self.depth_msaa_bgl, None),
-            };
 
-            let bg = if view.texture().sample_count() > 1 { // if MSAA
-                self.device.create_bind_group(&BindGroupDescriptor {
-                    label: Some("Fullscreen Msaa Bind Group"),
-                    layout,
-                    entries: &[BindGroupEntry {
-                        binding: 0,
-                        resource: BindingResource::TextureView(view),
-                    }],
-                })
-            } else { // NOT MSAA
-                let Some(sampler) = sampler else { panic!("Sampler is None in Bind group creation in fullscreen.rs, even though MSAA is OFF!") };
-                self.device.create_bind_group(&BindGroupDescriptor {
-                    label: Some("Fullscreen Bind Group"),
-                    layout,
-                    entries: &[
-                        BindGroupEntry {
+        let is_msaa = view.texture().sample_count() > 1;
+
+        if !self.bind_groups.contains_key(&key) {
+            let bg = match (kind, is_msaa, is_filterable) {
+                // MSAA textures: no sampler, just texture at binding 0
+                (PipelineKind::Color | PipelineKind::RedToGrayscale, true, _) => {
+                    self.device.create_bind_group(&BindGroupDescriptor {
+                        label: Some("Fullscreen Color MSAA Bind Group"),
+                        layout: &self.color_msaa_bgl,
+                        entries: &[BindGroupEntry {
                             binding: 0,
-                            resource: BindingResource::Sampler(sampler),
-                        },
-                        BindGroupEntry {
-                            binding: 1,
                             resource: BindingResource::TextureView(view),
-                        },
-                    ],
-                })
+                        }],
+                    })
+                }
+                (PipelineKind::Depth, true, _) => {
+                    self.device.create_bind_group(&BindGroupDescriptor {
+                        label: Some("Fullscreen Depth MSAA Bind Group"),
+                        layout: &self.depth_msaa_bgl,
+                        entries: &[BindGroupEntry {
+                            binding: 0,
+                            resource: BindingResource::TextureView(view),
+                        }],
+                    })
+                }
+
+                // Non-MSAA unfilterable: no sampler, just texture at binding 0
+                (PipelineKind::Color | PipelineKind::RedToGrayscale, false, false) => {
+                    self.device.create_bind_group(&BindGroupDescriptor {
+                        label: Some("Fullscreen Color Unfilterable Bind Group"),
+                        layout: &self.color_unfilterable_bgl,
+                        entries: &[BindGroupEntry {
+                            binding: 0,
+                            resource: BindingResource::TextureView(view),
+                        }],
+                    })
+                }
+
+                // Non-MSAA filterable: sampler + texture
+                (PipelineKind::Color | PipelineKind::RedToGrayscale, false, true) => {
+                    self.device.create_bind_group(&BindGroupDescriptor {
+                        label: Some("Fullscreen Color Bind Group"),
+                        layout: &self.color_bgl,
+                        entries: &[
+                            BindGroupEntry {
+                                binding: 0,
+                                resource: BindingResource::Sampler(&self.linear_sampler),
+                            },
+                            BindGroupEntry {
+                                binding: 1,
+                                resource: BindingResource::TextureView(view),
+                            },
+                        ],
+                    })
+                }
+
+                // Depth non-MSAA: nearest sampler + texture
+                (PipelineKind::Depth, false, _) => {
+                    self.device.create_bind_group(&BindGroupDescriptor {
+                        label: Some("Fullscreen Depth Bind Group"),
+                        layout: &self.depth_bgl,
+                        entries: &[
+                            BindGroupEntry {
+                                binding: 0,
+                                resource: BindingResource::Sampler(&self.nearest_sampler),
+                            },
+                            BindGroupEntry {
+                                binding: 1,
+                                resource: BindingResource::TextureView(view),
+                            },
+                        ],
+                    })
+                }
             };
 
             self.bind_groups.insert(key, bg);
         }
 
         self.bind_groups.get(&key).unwrap()
+    }
+}
+
+/// Infer a `BindingType::Texture` for a view + device.
+fn infer_texture_binding_type(view: &TextureView, device: &Device, aspect: Option<TextureAspect>) -> BindingType {
+    let format = view.texture().format();
+    // ask the format what sample type it wants for the given aspect + device features
+    let sample_type = format
+        .sample_type(aspect, Some(device.features()))
+        .expect("unsupported/ambiguous texture format + aspect for sampling");
+
+    let multisampled = view.texture().sample_count() > 1;
+
+    BindingType::Texture {
+        sample_type,
+        view_dimension: TextureViewDimension::D2,
+        multisampled,
+    }
+}
+
+/// Infer an appropriate sampler binding type from the texture sample type.
+/// Note: depth textures are usually sampled with a comparison sampler and shader uses textureSampleCmp.
+fn infer_sampler_binding_type(sample_type: TextureSampleType) -> SamplerBindingType {
+    match sample_type {
+        TextureSampleType::Depth => SamplerBindingType::Comparison,
+        TextureSampleType::Float { filterable } => {
+            if filterable { SamplerBindingType::Filtering } else { SamplerBindingType::NonFiltering }
+        }
+        TextureSampleType::Uint | TextureSampleType::Sint => SamplerBindingType::NonFiltering,
     }
 }

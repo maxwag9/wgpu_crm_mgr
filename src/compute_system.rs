@@ -20,7 +20,7 @@ impl Default for ComputePipelineOptions {
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct PipelineKey {
     shader_path: String,
-    input_specs: Vec<(TextureFormat, u32)>, // (format, sample_count)
+    input_specs: Vec<(TextureFormat, u32, bool)>, // (format, sample_count, is_filterable)
     output_formats: Vec<TextureFormat>,
     uniform_count: usize,
 }
@@ -54,7 +54,8 @@ pub struct ComputeSystem {
     device: Device,
     queue: Queue,
     pipeline_cache: HashMap<PipelineKey, CachedPipeline>,
-    default_sampler: Sampler,
+    filtering_sampler: Sampler,
+    non_filtering_sampler: Sampler,
 }
 
 impl ComputeSystem {
@@ -65,10 +66,20 @@ impl ComputeSystem {
     pub fn new(device: &Device, queue: &Queue) -> Self {
         let device = device.clone();
         let queue = queue.clone();
-        let default_sampler = device.create_sampler(&SamplerDescriptor {
-            label: Some("compute_sampler"),
+
+        let filtering_sampler = device.create_sampler(&SamplerDescriptor {
+            label: Some("compute_filtering_sampler"),
             mag_filter: FilterMode::Linear,
             min_filter: FilterMode::Linear,
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+
+        let non_filtering_sampler = device.create_sampler(&SamplerDescriptor {
+            label: Some("compute_non_filtering_sampler"),
+            mag_filter: FilterMode::Nearest,
+            min_filter: FilterMode::Nearest,
             address_mode_u: AddressMode::ClampToEdge,
             address_mode_v: AddressMode::ClampToEdge,
             ..Default::default()
@@ -78,7 +89,8 @@ impl ComputeSystem {
             device,
             queue,
             pipeline_cache: HashMap::new(),
-            default_sampler,
+            filtering_sampler,
+            non_filtering_sampler,
         }
     }
 
@@ -133,7 +145,10 @@ impl ComputeSystem {
             .iter()
             .map(|v| {
                 let tex = v.texture();
-                (tex.format(), tex.sample_count())
+                let format = tex.format();
+                let sample_count = tex.sample_count();
+                let is_filterable = self.is_format_filterable(format, sample_count);
+                (format, sample_count, is_filterable)
             })
             .collect();
 
@@ -154,8 +169,13 @@ impl ComputeSystem {
         }
         let cached = self.pipeline_cache.get(&key).unwrap();
 
+        // Determine if we can use filtering sampler (all non-depth, non-msaa inputs must be filterable)
+        let use_filtering = input_specs.iter().all(|(format, sample_count, is_filterable)| {
+            format.has_depth_aspect() || *sample_count > 1 || *is_filterable
+        });
+
         // Create bind groups
-        let input_bg = self.create_input_bind_group(&cached.bind_group_layouts[0], &input_views);
+        let input_bg = self.create_input_bind_group(&cached.bind_group_layouts[0], &input_views, use_filtering);
         let output_bg = self.create_output_bind_group(&cached.bind_group_layouts[1], &output_views);
         let uniform_bg = self.create_uniform_bind_group(&cached.bind_group_layouts[2], uniforms);
 
@@ -184,30 +204,31 @@ impl ComputeSystem {
         self.queue.submit(std::iter::once(encoder.finish()));
     }
 
+    // let mut compute = ComputeSystem::new(&device, &queue); // Caches device and queue so you don't have to pass it in again
+    // compute.compute(
+    //     "Resolve Depth",             // Label
+    //     vec![&msaa_depth_view],      // Input Views
+    //     vec![&resoloved_depth_view], // Input Views
+    //     shader_path,                 // Shader Path
+    //     options,                     // ComputePipelineOptions
+    //     &[&camera_buffer]            // Optional Buffers
+    // );
+    // let mut render_manager = RenderManager::new(&device, &queue, texture_shaders_path);
+    // render_manager.render(
+    //     &[TextureKey],               // TextureKeys for included procedural textures
+    //     shader_path,                 // Shader Path
+    //     options,                     // PipelineOptions
+    //     &[&camera_buffer],           // Optional Buffers
+    //     pass                         // Your own pass!
+    // );
+
     fn create_pipeline(
         &self,
         shader_path: &str,
-        input_specs: &[(TextureFormat, u32)],
+        input_specs: &[(TextureFormat, u32, bool)], // (format, sample_count, is_filterable)
         output_formats: &[TextureFormat],
         uniform_count: usize,
     ) -> CachedPipeline {
-        // let mut compute = ComputeSystem::new(&device, &queue); // Caches device and queue so you don't have to pass it in again
-        // compute.compute(
-        //     "Resolve Depth",             // Label
-        //     vec![&msaa_depth_view],      // Input Views
-        //     vec![&resoloved_depth_view], // Input Views
-        //     shader_path,                 // Shader Path
-        //     options,                     // ComputePipelineOptions
-        //     &[&camera_buffer]            // Optional Buffers
-        // );
-        // let mut render_manager = RenderManager::new(&device, &queue, texture_shaders_path);
-        // render_manager.render(
-        //     &[TextureKey],               // TextureKeys for included procedural textures
-        //     shader_path,                 // Shader Path
-        //     options,                     // PipelineOptions
-        //     &[&camera_buffer],           // Optional Buffers
-        //     pass                         // Your own pass!
-        // );
         let shader_source = fs::read_to_string(shader_path)
             .unwrap_or_else(|_| panic!("Failed to read shader: {}", shader_path));
 
@@ -216,17 +237,22 @@ impl ComputeSystem {
             source: ShaderSource::Wgsl(shader_source.into()),
         });
 
+        // Determine if we can use filtering sampler
+        let use_filtering = input_specs.iter().all(|(format, sample_count, is_filterable)| {
+            format.has_depth_aspect() || *sample_count > 1 || *is_filterable
+        });
+
         // Group 0: inputs + sampler
         let mut input_entries: Vec<BindGroupLayoutEntry> = input_specs
             .iter()
             .enumerate()
-            .map(|(i, (format, sample_count))| {
+            .map(|(i, (format, sample_count, is_filterable))| {
                 let multisampled = *sample_count > 1;
                 let sample_type = if format.has_depth_aspect() {
                     TextureSampleType::Depth
                 } else {
                     TextureSampleType::Float {
-                        filterable: !multisampled,
+                        filterable: *is_filterable && !multisampled,
                     }
                 };
 
@@ -244,10 +270,16 @@ impl ComputeSystem {
             .collect();
 
         if !input_specs.is_empty() {
+            let sampler_type = if use_filtering {
+                SamplerBindingType::Filtering
+            } else {
+                SamplerBindingType::NonFiltering
+            };
+
             input_entries.push(BindGroupLayoutEntry {
                 binding: input_specs.len() as u32,
                 visibility: ShaderStages::COMPUTE,
-                ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                ty: BindingType::Sampler(sampler_type),
                 count: None,
             });
         }
@@ -334,6 +366,7 @@ impl ComputeSystem {
         &self,
         layout: &BindGroupLayout,
         views: &[&TextureView],
+        use_filtering: bool,
     ) -> BindGroup {
         let mut entries: Vec<BindGroupEntry> = views
             .iter()
@@ -345,9 +378,15 @@ impl ComputeSystem {
             .collect();
 
         if !views.is_empty() {
+            let sampler = if use_filtering {
+                &self.filtering_sampler
+            } else {
+                &self.non_filtering_sampler
+            };
+
             entries.push(BindGroupEntry {
                 binding: views.len() as u32,
-                resource: BindingResource::Sampler(&self.default_sampler),
+                resource: BindingResource::Sampler(sampler),
             });
         }
 
@@ -406,5 +445,22 @@ impl ComputeSystem {
     /// need to be recreated.
     pub fn invalidate_cache(&mut self) {
         self.pipeline_cache.clear();
+    }
+    fn is_format_filterable(&self, format: TextureFormat, sample_count: u32) -> bool {
+        if sample_count > 1 {
+            // MSAA textures use textureLoad, filterability doesn't apply
+            return false;
+        }
+
+        if format.has_depth_aspect() {
+            // Depth textures have their own sample type
+            return false;
+        }
+
+        // Check if the format supports filtering with current device features
+        match format.sample_type(None, Some(self.device.features())) {
+            Some(TextureSampleType::Float { filterable }) => filterable,
+            _ => false,
+        }
     }
 }
