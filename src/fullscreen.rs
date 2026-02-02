@@ -30,8 +30,8 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
     return out;
 }
 
-@group(0) @binding(0) var t_tex: texture_2d<f32>;
-@group(0) @binding(1) var s_tex: sampler;
+@group(0) @binding(0) var s_tex: sampler;
+@group(0) @binding(1) var t_tex: texture_2d<f32>;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -51,9 +51,8 @@ struct DepthParams {
     power: f32,
     reversed_z: u32,
 };
-
-@group(0) @binding(0) var t_depth: texture_depth_2d;
-@group(0) @binding(1) var s_depth: sampler;
+@group(0) @binding(0) var s_depth: sampler;
+@group(0) @binding(1) var t_depth: texture_depth_2d;
 @group(1) @binding(0) var<uniform> params: DepthParams;
 
 fn linearize_depth(d: f32, near: f32, far: f32, reversed: bool) -> f32 {
@@ -93,7 +92,107 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(v, v, v, 1.0);
 }
 "#;
+const FULLSCREEN_COLOR_MSAA_SHADER: &str = r#"
+struct DepthParams {
+    near: f32,
+    far: f32,
+    power: f32,
+    reversed_z: u32,
+};
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    var uvs = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+    );
+    var out: VertexOutput;
+    out.position = vec4<f32>(positions[idx], 0.0, 1.0);
+    out.uv = uvs[idx];
+    return out;
+}
+@group(0) @binding(0) var t_tex: texture_multisampled_2d<f32>;
 
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let dims = textureDimensions(t_tex);
+    let coord = vec2<i32>(in.uv * vec2<f32>(dims));
+    var c = vec4<f32>(0.0);
+    for (var i = 0u; i < textureNumSamples(t_tex); i++) {
+        c += textureLoad(t_tex, coord, i);
+    }
+    return c / f32(textureNumSamples(t_tex));
+}
+"#;
+
+const FULLSCREEN_DEPTH_MSAA_SHADER: &str = r#"
+struct DepthParams {
+    near: f32,
+    far: f32,
+    power: f32,
+    reversed_z: u32,
+};
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    var uvs = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+    );
+    var out: VertexOutput;
+    out.position = vec4<f32>(positions[idx], 0.0, 1.0);
+    out.uv = uvs[idx];
+    return out;
+}
+fn linearize_depth(d: f32, near: f32, far: f32, reversed: bool) -> f32 {
+    if reversed {
+        return near / d;
+    } else {
+        return (near * far) / (far - d * (far - near));
+    }
+}
+@group(0) @binding(0) var t_depth: texture_depth_multisampled_2d;
+@group(1) @binding(0) var<uniform> params: DepthParams;
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let dims = textureDimensions(t_depth);
+    let coord = vec2<i32>(in.uv * vec2<f32>(dims));
+
+    var d = 0.0;
+    for (var i = 0u; i < textureNumSamples(t_depth); i++) {
+        d += textureLoad(t_depth, coord, i);
+    }
+    d /= f32(textureNumSamples(t_depth));
+
+    let z = linearize_depth(d, params.near, params.far, params.reversed_z != 0u);
+    let v01 = 1.0 - clamp(z / params.far, 0.0, 1.0);
+    let v = pow(v01, params.power);
+    return vec4<f32>(v, v, v, 1.0);
+}
+"#;
 const FULLSCREEN_RED_TO_GRAYSCALE_SHADER: &str = r#"
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -120,12 +219,58 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
     return out;
 }
 
-@group(0) @binding(0) var t_tex: texture_2d<f32>;
-@group(0) @binding(1) var s_tex: sampler;
+@group(0) @binding(0) var s_tex: sampler;
+@group(0) @binding(1) var t_tex: texture_2d<f32>;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let c = textureSample(t_tex, s_tex, in.uv);
+    let v = c.r;
+    return vec4<f32>(v, v, v, 1.0);
+}
+"#;
+
+const FULLSCREEN_RED_TO_GRAYSCALE_MSAA_SHADER: &str = r#"
+struct DepthParams {
+    near: f32,
+    far: f32,
+    power: f32,
+    reversed_z: u32,
+};
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    var uvs = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+    );
+    var out: VertexOutput;
+    out.position = vec4<f32>(positions[idx], 0.0, 1.0);
+    out.uv = uvs[idx];
+    return out;
+}
+@group(0) @binding(0) var t_tex: texture_multisampled_2d<f32>;
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let dims = textureDimensions(t_tex);
+    let coord = vec2<i32>(in.uv * vec2<f32>(dims));
+    var c = vec4<f32>(0.0);
+    for (var i = 0u; i < textureNumSamples(t_tex); i++) {
+        c += textureLoad(t_tex, coord, i);
+    }
+
     let v = c.r;
     return vec4<f32>(v, v, v, 1.0);
 }
@@ -165,11 +310,20 @@ enum PipelineKind {
     Depth,
 }
 
+impl PipelineKind {
+    fn from_debug_visualization(visualization: DebugVisualization) -> Self {
+        match visualization {
+            DebugVisualization::Color => Self::Color,
+            DebugVisualization::RedToGrayscale => Self::RedToGrayscale,
+            DebugVisualization::Depth => Self::Depth
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct PipelineKey {
     kind: PipelineKind,
-    target_format: TextureFormat,
-    msaa_samples: u32,
+    target_format: TextureFormat
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -184,11 +338,16 @@ pub struct FullscreenRenderer {
     queue: Queue,
 
     color_shader: ShaderModule,
+    color_msaa_shader: ShaderModule,
     red_to_grayscale_shader: ShaderModule,
+    red_to_grayscale_msaa_shader: ShaderModule,
     depth_shader: ShaderModule,
+    depth_msaa_shader: ShaderModule,
 
     color_bgl: BindGroupLayout,
+    color_msaa_bgl: BindGroupLayout,
     depth_bgl: BindGroupLayout,
+    depth_msaa_bgl: BindGroupLayout,
     depth_params_bgl: BindGroupLayout,
 
     linear_sampler: Sampler,
@@ -199,69 +358,12 @@ pub struct FullscreenRenderer {
 
     depth_params_buffer: Option<Buffer>,
     depth_params_bind_group: Option<BindGroup>,
+
+
 }
 
 impl FullscreenRenderer {
     pub fn new(device: Device, queue: Queue) -> Self {
-        let color_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("fullscreen color shader"),
-            source: ShaderSource::Wgsl(FULLSCREEN_COLOR_SHADER.into()),
-        });
-
-        let grayscale_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("fullscreen grayscale shader"),
-            source: ShaderSource::Wgsl(FULLSCREEN_RED_TO_GRAYSCALE_SHADER.into()),
-        });
-
-        let depth_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("fullscreen depth shader"),
-            source: ShaderSource::Wgsl(FULLSCREEN_DEPTH_SHADER.into()),
-        });
-
-        let color_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("fullscreen color bgl"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: true },
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-
-        let depth_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("fullscreen depth bgl"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Depth,
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Sampler(SamplerBindingType::NonFiltering),
-                    count: None,
-                },
-            ],
-        });
-
         let depth_params_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("depth params bgl"),
             entries: &[BindGroupLayoutEntry {
@@ -275,16 +377,114 @@ impl FullscreenRenderer {
                 count: None,
             }],
         });
+        let color_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("fullscreen color shader"),
+            source: ShaderSource::Wgsl(FULLSCREEN_COLOR_SHADER.into()),
+        });
+        let color_msaa_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("fullscreen color MSAA shader"),
+            source: ShaderSource::Wgsl(FULLSCREEN_COLOR_MSAA_SHADER.into()),
+        });
+        let red_to_grayscale_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("fullscreen grayscale shader"),
+            source: ShaderSource::Wgsl(FULLSCREEN_RED_TO_GRAYSCALE_SHADER.into()),
+        });
+        let red_to_grayscale_msaa_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("fullscreen grayscale shader"),
+            source: ShaderSource::Wgsl(FULLSCREEN_RED_TO_GRAYSCALE_MSAA_SHADER.into()),
+        });
+        let depth_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("fullscreen depth shader"),
+            source: ShaderSource::Wgsl(FULLSCREEN_DEPTH_SHADER.into()),
+        });
+        let depth_msaa_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("fullscreen depth MSAA shader"),
+            source: ShaderSource::Wgsl(FULLSCREEN_DEPTH_MSAA_SHADER.into()),
+        });
+        let color_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("fullscreen color bgl"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let color_msaa_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("fullscreen color msaa bgl"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: false },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: true,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let depth_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("fullscreen depth bgl"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Depth,
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let depth_msaa_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("fullscreen depth msaa bgl"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Depth,
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: true,
+                    },
+                    count: None,
+                },
+            ],
+        });
 
         let linear_sampler = device.create_sampler(&SamplerDescriptor {
-            label: Some("fullscreen linear sampler"),
+            label: Some("Fullscreen Linear Sampler"),
             mag_filter: FilterMode::Linear,
             min_filter: FilterMode::Linear,
             ..Default::default()
         });
 
         let nearest_sampler = device.create_sampler(&SamplerDescriptor {
-            label: Some("fullscreen nearest sampler"),
+            label: Some("Fullscreen Nearest Sampler"),
             mag_filter: FilterMode::Nearest,
             min_filter: FilterMode::Nearest,
             ..Default::default()
@@ -294,10 +494,15 @@ impl FullscreenRenderer {
             device,
             queue,
             color_shader,
-            red_to_grayscale_shader: grayscale_shader,
+            color_msaa_shader,
+            red_to_grayscale_shader,
+            red_to_grayscale_msaa_shader,
             depth_shader,
+            depth_msaa_shader,
             color_bgl,
+            color_msaa_bgl,
             depth_bgl,
+            depth_msaa_bgl,
             depth_params_bgl,
             linear_sampler,
             nearest_sampler,
@@ -308,22 +513,57 @@ impl FullscreenRenderer {
         }
     }
 
-    /// Render a texture to the current render pass as a fullscreen quad.
+    /// Renders a texture to the current render pass as a fullscreen quad.
+    ///
+    /// This function is intended for **debugging and visualization** of GPU
+    /// textures such as color buffers, depth buffers, or intermediate render
+    /// targets.
+    ///
+    /// ## What this does
+    /// - Selects or creates a render pipeline based on [`DebugVisualization`]
+    /// - Binds the provided texture as `@group(0)`
+    /// - Optionally binds depth visualization parameters at `@group(1)`
+    /// - Draws a fullscreen quad using a single draw call and internal shaders
+    ///
+    /// ## Target View
+    /// `target_view` **must match** the color attachment of the render pass.
+    /// It is used to infer the render target format and MSAA sample count
+    /// for pipeline selection.
+    ///
+    /// ## Parameters
+    /// - `texture`: Texture view to visualize
+    /// - `visualization`: What the texture should be interpreted as (color, depth, etc.)
+    /// - `target_format`: Format of the render target this pass is writing to
+    /// - `pass`: Active render pass to record commands into
+    ///
+    /// ### Panics
+    /// This function may panic if internal pipeline or bind group creation fails.
+    ///
+    /// ### Errors
+    /// wgpu validation errors may occur if the texture, target view,
+    /// or render pass configuration are incompatible.
+    ///
+    /// ## Example
+    /// ```no_run
+    /// // Inside a render pass
+    /// fullscreen_renderer.render(
+    ///     &color_view,
+    ///     DebugVisualization::Color,
+    ///     &target_view,
+    ///     &mut render_pass,
+    /// );
+    /// ```
     pub fn render(
         &mut self,
         texture: &TextureView,
-        visualization: DebugVisualization,
-        target_format: TextureFormat,
-        msaa_samples: u32,
+        visualization_type: DebugVisualization,
+        target_view: &TextureView,
         pass: &mut RenderPass,
     ) {
-        let kind = match visualization {
-            DebugVisualization::Color => PipelineKind::Color,
-            DebugVisualization::RedToGrayscale => PipelineKind::RedToGrayscale,
-            DebugVisualization::Depth => {PipelineKind::Depth}
-        };
-
-        let pipeline = self.get_or_create_pipeline(kind, target_format, msaa_samples);
+        let kind = PipelineKind::from_debug_visualization(visualization_type);
+        let pipeline_msaa_samples = target_view.texture().sample_count();
+        let target_format = target_view.texture().format();
+        let pipeline = self.get_or_create_pipeline(texture, kind, target_format, pipeline_msaa_samples);
         pass.set_pipeline(pipeline);
         let bind_group = self.get_or_create_bind_group(texture, kind);
         pass.set_bind_group(0, bind_group, &[]);
@@ -338,7 +578,7 @@ impl FullscreenRenderer {
     }
 
     /// Clear cached bind groups (call when textures are recreated).
-    pub fn invalidate_bind_groups(&mut self) {
+    pub(crate) fn invalidate_bind_groups(&mut self) {
         self.bind_groups.clear();
     }
 
@@ -368,14 +608,15 @@ impl FullscreenRenderer {
 
     fn get_or_create_pipeline(
         &mut self,
+        texture: &TextureView,
         kind: PipelineKind,
         target_format: TextureFormat,
-        msaa_samples: u32,
+        pipeline_msaa_samples: u32
     ) -> &RenderPipeline {
-        let key = PipelineKey { kind, target_format, msaa_samples };
+        let key = PipelineKey { kind, target_format };
 
         if !self.pipelines.contains_key(&key) {
-            let pipeline = self.create_pipeline(kind, target_format, msaa_samples);
+            let pipeline = self.create_pipeline(texture, kind, target_format, pipeline_msaa_samples);
             self.pipelines.insert(key, pipeline);
         }
 
@@ -384,22 +625,24 @@ impl FullscreenRenderer {
 
     fn create_pipeline(
         &self,
+        texture: &TextureView,
         kind: PipelineKind,
         target_format: TextureFormat,
-        msaa_samples: u32,
+        pipeline_msaa_samples: u32
     ) -> RenderPipeline {
-        let (shader, bgl) = match kind {
-            PipelineKind::Color => (&self.color_shader, &self.color_bgl),
-            PipelineKind::RedToGrayscale => (&self.red_to_grayscale_shader, &self.color_bgl),
-            PipelineKind::Depth => (&self.depth_shader, &self.depth_bgl),
+        let is_msaa = texture.texture().sample_count() > 1;
+        let (shader, bgl) = match (kind, is_msaa) {
+            (PipelineKind::Color, false) => (&self.color_shader, &self.color_bgl),
+            (PipelineKind::Color, true)  => (&self.color_msaa_shader, &self.color_msaa_bgl),
+
+            (PipelineKind::RedToGrayscale, false) => (&self.red_to_grayscale_shader, &self.color_bgl),
+            (PipelineKind::RedToGrayscale, true)  => (&self.red_to_grayscale_msaa_shader, &self.color_msaa_bgl),
+
+            (PipelineKind::Depth, false) => (&self.depth_shader, &self.depth_bgl),
+            (PipelineKind::Depth, true)  => (&self.depth_msaa_shader, &self.depth_msaa_bgl),
         };
 
-        let bind_group_layouts: Vec<&BindGroupLayout> = if kind == PipelineKind::Depth {
-            vec![bgl, &self.depth_params_bgl]
-        } else {
-            vec![bgl]
-        };
-
+        let bind_group_layouts: Vec<&BindGroupLayout> = if kind == PipelineKind::Depth { vec![bgl, &self.depth_params_bgl] } else { vec![bgl] };
         let layout = self.device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("fullscreen pipeline layout"),
             bind_group_layouts: &bind_group_layouts,
@@ -431,7 +674,7 @@ impl FullscreenRenderer {
             },
             depth_stencil: None,
             multisample: MultisampleState {
-                count: msaa_samples,
+                count: pipeline_msaa_samples,
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
@@ -445,27 +688,41 @@ impl FullscreenRenderer {
             view_ptr: view as *const TextureView as usize,
             kind,
         };
-
+        let is_msaa = view.texture().sample_count() > 1;
         if !self.bind_groups.contains_key(&key) {
-            let (layout, sampler) = match kind {
-                PipelineKind::Color | PipelineKind::RedToGrayscale => (&self.color_bgl, &self.linear_sampler),
-                PipelineKind::Depth => (&self.depth_bgl, &self.nearest_sampler),
+            let (layout, sampler) = match (kind, is_msaa) {
+                (PipelineKind::Color | PipelineKind::RedToGrayscale, false) => (&self.color_bgl, Some(&self.linear_sampler)),
+                (PipelineKind::Color | PipelineKind::RedToGrayscale, true) => (&self.color_msaa_bgl, None),
+                (PipelineKind::Depth, false) => (&self.depth_bgl, Some(&self.nearest_sampler)),
+                (PipelineKind::Depth, true) => (&self.depth_msaa_bgl, None),
             };
 
-            let bg = self.device.create_bind_group(&BindGroupDescriptor {
-                label: Some("fullscreen bind group"),
-                layout,
-                entries: &[
-                    BindGroupEntry {
+            let bg = if view.texture().sample_count() > 1 { // if MSAA
+                self.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Fullscreen Msaa Bind Group"),
+                    layout,
+                    entries: &[BindGroupEntry {
                         binding: 0,
                         resource: BindingResource::TextureView(view),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        resource: BindingResource::Sampler(sampler),
-                    },
-                ],
-            });
+                    }],
+                })
+            } else { // NOT MSAA
+                let Some(sampler) = sampler else { panic!("Sampler is None in Bind group creation in fullscreen.rs, even though MSAA is OFF!") };
+                self.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Fullscreen Bind Group"),
+                    layout,
+                    entries: &[
+                        BindGroupEntry {
+                            binding: 0,
+                            resource: BindingResource::Sampler(sampler),
+                        },
+                        BindGroupEntry {
+                            binding: 1,
+                            resource: BindingResource::TextureView(view),
+                        },
+                    ],
+                })
+            };
 
             self.bind_groups.insert(key, bg);
         }

@@ -30,6 +30,26 @@ struct CachedPipeline {
     bind_group_layouts: [BindGroupLayout; 3],
 }
 
+/// High-level compute shader runner with automatic pipeline caching.
+///
+/// `ComputeSystem` provides a structured way to execute compute shaders
+/// with multiple input textures, output storage textures, and optional
+/// uniform buffers, while reusing pipelines whenever possible.
+///
+/// ## Features
+/// - Automatic compute pipeline caching
+/// - Flexible input and output texture bindings
+/// - Optional uniform buffer bindings
+/// - Built-in sampler for input textures
+///
+/// ## Design notes
+/// - Pipelines are cached based on shader path, texture formats,
+///   MSAA sample counts, and uniform count
+/// - Bind group layouts are generated dynamically per pipeline
+/// - This type owns its own command encoder per dispatch
+///
+/// This is intended for procedural texture generation, post-processing,
+/// and general GPU compute workloads.
 pub struct ComputeSystem {
     device: Device,
     queue: Queue,
@@ -38,6 +58,10 @@ pub struct ComputeSystem {
 }
 
 impl ComputeSystem {
+    /// Create a new `ComputeSystem`.
+    ///
+    /// The provided `device` and `queue` are cloned internally (cheap, just handles).
+    /// A default linear sampler is created and reused for all input textures.
     pub fn new(device: &Device, queue: &Queue) -> Self {
         let device = device.clone();
         let queue = queue.clone();
@@ -58,15 +82,44 @@ impl ComputeSystem {
         }
     }
 
-    /// Run a compute pass.
+    /// Execute a compute shader.
     ///
-    /// Bind group layout:
-    /// - group(0): input textures (binding 0..n) + sampler (binding n)
-    /// - group(1): output storage textures (binding 0..m)
-    /// - group(2): uniform buffers (binding 0..k)
+    /// This method creates (or reuses) a cached compute pipeline, sets up
+    /// bind groups, dispatches workgroups, and submits the command buffer.
     ///
-    /// Empty vectors result in empty bind groups for those slots.
-    /// MSAA textures are automatically detected via sample_count.
+    /// ## Bind group layout
+    /// - `@group(0)`: input textures + sampler
+    ///   - `binding 0..n`: input texture views
+    ///   - `binding n`: shared sampler
+    /// - `@group(1)`: output storage textures
+    ///   - `binding 0..m`: output texture views
+    /// - `@group(2)`: uniform buffers
+    ///   - `binding 0..k`: uniform buffers
+    ///
+    /// Empty input, output, or uniform lists result in empty bind groups
+    /// for the corresponding slots.
+    ///
+    /// ## Texture handling
+    /// - MSAA input textures are detected automatically via `sample_count`
+    /// - Depth textures use depth sampling where applicable
+    ///
+    /// ## Parameters
+    /// - `label`: Debug label for the command encoder and compute pass
+    /// - `input_views`: Read-only input textures
+    /// - `output_views`: Write-only storage textures
+    /// - `shader_path`: Path to the WGSL compute shader
+    /// - `options`: Compute pipeline and dispatch configuration
+    /// - `uniforms`: Optional uniform buffers
+    ///
+    /// ## Notes
+    /// - The shader entry point must be named `main`
+    /// - The dispatch size is taken from `options.dispatch_size`
+    ///
+    /// ## WGSL expectations
+    /// - Entry point: `@compute @workgroup_size(...) fn main()`
+    /// - Input textures must match the order provided to `compute`
+    /// - Output textures must be declared as `texture_storage_2d`
+    /// - Uniform buffers must match binding indices exactly
     pub fn compute(
         &mut self,
         label: &str,
@@ -347,7 +400,10 @@ impl ComputeSystem {
         })
     }
 
-    /// Clear the pipeline cache (useful if shaders changed on disk)
+    /// Clear the internal compute pipeline cache.
+    ///
+    /// Call this if compute shaders on disk have changed and pipelines
+    /// need to be recreated.
     pub fn invalidate_cache(&mut self) {
         self.pipeline_cache.clear();
     }

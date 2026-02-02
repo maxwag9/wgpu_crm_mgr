@@ -1,4 +1,32 @@
 #![allow(dead_code)]
+//! ## Procedural texture shader contract
+//!
+//! Procedural textures are generated using WGSL compute shaders.
+//! Each shader must follow this binding layout exactly:
+//!
+//! ### Bind group layout
+//! - `@group(0) @binding(0)`
+//!   - `texture_storage_2d<rgba8unorm, write>`
+//!   - Destination texture for the current mip level
+//!
+//! - `@group(0) @binding(1)`
+//!   - Uniform buffer containing [`TextureParams`]
+//!
+//! ### Entry point
+//! ```wgsl
+//! @compute
+//! @workgroup_size(8, 8, 1)
+//! fn main(@builtin(global_invocation_id) id: vec3<u32>) { ... }
+//! ```
+//!
+//! ### Mip generation
+//! The compute shader is dispatched once per mip level.
+//! The destination texture view always refers to the current mip only.
+//!
+//! ### Resolution
+//! The shader must infer pixel coordinates from
+//! `global_invocation_id.xy` and must not write out of bounds.
+
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
@@ -7,8 +35,18 @@ use wgpu::{Device, Queue, TextureView};
 
 /// Parameters passed to procedural texture generation shaders.
 ///
-/// This struct is laid out for GPU uniform buffer compatibility.
-/// Shaders should expect this layout at binding 1.
+/// This struct is uploaded to the GPU as a uniform buffer and must
+/// match the expected WGSL layout exactly.
+///
+/// ## GPU layout
+/// - Bound at `@group(0) @binding(1)`
+/// - `#[repr(C)]` and `bytemuck::Pod` for safe GPU transfer
+///
+/// ## Usage
+/// These parameters are typically used for noise-based or procedural
+/// texture generation (colors, scale, octaves, etc.).
+///
+/// Padding fields are included to satisfy GPU alignment requirements.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TextureParams {
@@ -42,41 +80,42 @@ impl Default for TextureParams {
 }
 
 impl TextureParams {
+    /// Set the random seed used by the shader.
     pub fn with_seed(mut self, seed: u32) -> Self {
         self.seed = seed;
         self
     }
-
+    /// Set the texture scale or frequency.
     pub fn with_scale(mut self, scale: f32) -> Self {
         self.scale = scale;
         self
     }
-
+    /// Set the roughness parameter.
     pub fn with_roughness(mut self, roughness: f32) -> Self {
         self.roughness = roughness;
         self
     }
-
+    /// Set the primary color.
     pub fn with_primary_color(mut self, color: [f32; 4]) -> Self {
         self.color_primary = color;
         self
     }
-
+    /// Set the secondary color.
     pub fn with_secondary_color(mut self, color: [f32; 4]) -> Self {
         self.color_secondary = color;
         self
     }
-
+    /// Set the number of noise octaves.
     pub fn with_octaves(mut self, octaves: f32) -> Self {
         self.octaves = octaves;
         self
     }
-
+    /// Set the persistence factor between octaves.
     pub fn with_persistence(mut self, persistence: f32) -> Self {
         self.persistence = persistence;
         self
     }
-
+    /// Set the lacunarity factor between octaves.
     pub fn with_lacunarity(mut self, lacunarity: f32) -> Self {
         self.lacunarity = lacunarity;
         self
@@ -115,7 +154,14 @@ impl Hash for TextureParams {
     }
 }
 
-/// Key for cached texture lookup.
+/// Key used for procedural texture caching.
+///
+/// Textures are uniquely identified by:
+/// - Shader ID
+/// - Texture parameters
+/// - Output resolution
+///
+/// Identical keys will always reuse the same cached texture.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TextureKey {
     pub shader_id: String,
@@ -145,10 +191,21 @@ struct ComputePipeline {
 
 /// GPU-based procedural texture generator.
 ///
-/// Generates textures using WGSL compute shaders. Shaders are automatically
-/// loaded from `{shader_dir}/{shader_id.to_lowercase()}.wgsl`.
+/// Textures are generated using WGSL compute shaders and cached
+/// to avoid redundant computation.
 ///
-/// Textures are cached by their parameters to avoid redundant computation.
+/// ## Shader loading
+/// Shaders are automatically loaded from:
+/// `{shader_dir}/{shader_id.to_lowercase()}.wgsl`
+///
+/// ## Caching behavior
+/// - Pipelines are cached per shader ID
+/// - Generated textures are cached per [`TextureKey`]
+/// - Identical keys always return the same texture view
+///
+/// ## Mip generation
+/// All mip levels are generated on the GPU in a single compute pass,
+/// with one dispatch per mip level.
 pub struct TextureGenerator {
     device: Device,
     queue: Queue,
@@ -158,9 +215,9 @@ pub struct TextureGenerator {
 }
 
 impl TextureGenerator {
-    /// Create a new texture generator.
+    /// Create a new `TextureGenerator`.
     ///
-    /// Shaders will be loaded from `{shader_dir}/{material_name.to_lowercase()}.wgsl`.
+    /// Procedural texture shaders will be loaded from `{shader_dir}/{material_name.to_lowercase()}.wgsl`.
     pub fn new(device: Device, queue: Queue, shader_dir: PathBuf) -> Self {
         Self {
             device,
@@ -171,12 +228,18 @@ impl TextureGenerator {
         }
     }
 
-    /// Get or create a texture for the given key.
+    /// Get or generate a procedural texture.
     ///
-    /// Returns a view to the generated texture. The texture is cached
-    /// and will be reused for identical keys.
+    /// If a texture matching the given [`TextureKey`] already exists,
+    /// it is returned from the cache. Otherwise, the texture is generated
+    /// using the associated compute shader.
     ///
-    /// The shader is automatically loaded from `{shader_dir}/{shader_id.to_lowercase()}.wgsl`.
+    /// ## Shader resolution
+    /// The shader is loaded from:
+    /// `{shader_dir}/{shader_id.to_lowercase()}.wgsl`
+    ///
+    /// ## Returns
+    /// A [`TextureView`] referencing the generated texture.
     pub fn get_or_create(&mut self, key: &TextureKey) -> &TextureView {
         if !self.cache.contains_key(key) {
             self.ensure_pipeline(&key.shader_id);
@@ -190,7 +253,7 @@ impl TextureGenerator {
         self.cache.clear();
     }
 
-    /// Reload all shaders and invalidate caches.
+    /// Reload all procedural texture shaders and invalidate caches.
     pub fn reload_shaders(&mut self) {
         self.pipelines.clear();
         self.cache.clear();

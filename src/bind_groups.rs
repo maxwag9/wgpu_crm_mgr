@@ -14,15 +14,15 @@ impl MaterialBindGroupKey {
 }
 
 /// Manages material bind groups containing textures and samplers.
-pub struct MaterialBindGroups {
+pub(crate) struct MaterialBindGroups {
     device: Device,
     sampler: Sampler,
-    pub layouts: HashMap<(usize, bool), BindGroupLayout>,
+    pub(crate) layouts: HashMap<(usize, bool), BindGroupLayout>,
     bind_groups: HashMap<MaterialBindGroupKey, BindGroup>,
 }
 
 impl MaterialBindGroups {
-    pub fn new(device: Device) -> Self {
+    pub(crate) fn new(device: Device) -> Self {
         let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("material sampler"),
             address_mode_u: AddressMode::Repeat,
@@ -43,7 +43,7 @@ impl MaterialBindGroups {
     }
 
     /// Returns the bind group layout for the given texture count.
-    pub fn layout(
+    pub(crate) fn layout(
         &mut self,
         texture_views: &[&TextureView],
         has_shadow: bool,
@@ -125,7 +125,7 @@ impl MaterialBindGroups {
 
 
     /// Returns a bind group for the given texture views, creating it if necessary.
-    pub fn get_or_create(
+    pub(crate) fn get_or_create(
         &mut self,
         texture_views: &[&TextureView],
         shadow: Option<(&Sampler, &TextureView)>,

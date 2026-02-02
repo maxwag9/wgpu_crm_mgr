@@ -5,26 +5,98 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use wgpu::*;
 
+/// Options required to enable shadow sampling in a render pipeline.
+///
+/// When provided, the pipeline will expose additional bindings for
+/// shadow comparison sampling, following the shader layout described below.
+///
+/// ## Shader Binding layout (group 0)
+/// - `@binding(n + 1)`: comparison sampler
+/// - `@binding(n + 2)`: shadow map as `texture_depth_2d_array`
+///
+/// Where `n` is the number of material textures bound before shadows.
+///
+/// The sampler **must** be a comparison sampler compatible with
+/// depth textures, and the texture view must point to a depth texture
+/// array.
 #[derive(Clone, Debug)]
 pub struct ShadowOptions {
+    /// Comparison sampler used for shadow testing.
     pub sampler: Sampler,
+    /// Depth texture array containing shadow maps.
     pub view: TextureView,
 }
 
-/// Configuration for creating a render pipeline.
+/// Configuration object for creating a render pipeline.
+///
+/// `PipelineOptions` describes fixed-function and layout-related state
+/// used when creating a `wgpu::RenderPipeline`. It is intentionally
+/// builder-based to allow concise and readable pipeline setup.
+///
+/// This type does **not** own shaders. It only defines how vertex data,
+/// rasterization, depth testing, MSAA, and render targets are configured.
+///
+/// ## Shader Binding layout
+///
+/// The pipeline is expected to follow this binding convention:
+///
+/// ### Group 0: Material + textures
+/// - `@binding(0)`: trilinear sampler
+/// - `@binding(1..n)`: material textures as
+///   `texture_2d<f32>` or `texture_multisampled_2d<f32>`
+/// - `@binding(n + 1)`: (optional) shadow comparison sampler
+/// - `@binding(n + 2)`: (optional) shadow map as
+///   `texture_depth_2d_array`
+///
+/// ### Group 1: Uniforms
+/// - `@binding(0..m)`: uniform buffers, in the same order as provided
+///
+/// Any mismatch between shader expectations and these bindings may
+/// result in wgpu validation errors.
 #[derive(Clone, Debug)]
 pub struct PipelineOptions {
+    /// Primitive topology used for rasterization.
     pub topology: PrimitiveTopology,
+
+    /// Number of MSAA samples used by the pipeline.
+    ///
+    /// This **must** match the sample count of the render target.
     pub msaa_samples: u32,
+
+    /// Optional depth-stencil configuration.
     pub depth_stencil: Option<DepthStencilState>,
+
+    /// Vertex buffer layouts consumed by the vertex shader.
     pub vertex_layouts: Vec<VertexBufferLayout<'static>>,
+
+    /// Optional face culling mode.
     pub cull_mode: Option<Face>,
+
+    /// Color target states for the fragment shader outputs.
+    ///
+    /// The length of this vector must match the number of render targets.
     pub targets: Vec<Option<ColorTargetState>>,
+
+    /// If true, the pipeline is created without a fragment stage.
+    ///
+    /// Useful for depth-only or shadow-map rendering.
     pub vertex_only: bool,
-    pub shadow: Option<ShadowOptions>
+
+    /// Optional shadow sampling configuration.
+    pub shadow: Option<ShadowOptions>,
 }
 
 impl Default for PipelineOptions {
+    /// Creates a default pipeline configuration.
+    ///
+    /// Defaults are chosen to represent a minimal color-rendering pipeline:
+    /// - Triangle list topology
+    /// - No MSAA
+    /// - No depth testing
+    /// - No vertex buffers
+    /// - No render targets
+    /// - Fragment stage enabled
+    /// - No shadows
     fn default() -> Self {
         Self {
             topology: PrimitiveTopology::TriangleList,
@@ -39,37 +111,54 @@ impl Default for PipelineOptions {
     }
 }
 
+
 impl PipelineOptions {
+    /// Sets the primitive topology used by the pipeline.
     pub fn with_topology(mut self, topology: PrimitiveTopology) -> Self {
         self.topology = topology;
         self
     }
 
+    /// Sets the MSAA sample count for the pipeline.
+    ///
+    /// This must match the sample count of the render target view.
     pub fn with_msaa(mut self, samples: u32) -> Self {
         self.msaa_samples = samples;
         self
     }
 
+    /// Enables depth-stencil testing using the provided state.
     pub fn with_depth_stencil(mut self, state: DepthStencilState) -> Self {
         self.depth_stencil = Some(state);
         self
     }
 
+    /// Adds a vertex buffer layout consumed by the vertex shader.
+    ///
+    /// Layouts are consumed in the order they are added.
     pub fn with_vertex_layout(mut self, layout: VertexBufferLayout<'static>) -> Self {
         self.vertex_layouts.push(layout);
         self
     }
 
+    /// Sets the face culling mode for rasterization.
     pub fn with_cull_mode(mut self, cull: Face) -> Self {
         self.cull_mode = Some(cull);
         self
     }
 
+    /// Adds a color render target to the pipeline.
+    ///
+    /// The order of targets must match the fragment shader outputs.
     pub fn with_target(mut self, target: ColorTargetState) -> Self {
         self.targets.push(Some(target));
         self
     }
 
+    /// Configures the pipeline as vertex-only.
+    ///
+    /// This disables the fragment stage entirely and is typically used
+    /// for depth-only or shadow-map passes.
     pub fn depth_only(mut self) -> Self {
         self.vertex_only = true;
         self
@@ -126,12 +215,12 @@ impl PipelineCache {
         }
     }
 
-    pub fn device(&self) -> &Device {
+    pub(crate) fn device(&self) -> &Device {
         &self.device
     }
 
     /// Get or create a uniform bind group layout for N uniform buffers.
-    pub fn uniform_layout(&mut self, buffer_count: usize) -> &BindGroupLayout {
+    pub(crate) fn uniform_layout(&mut self, buffer_count: usize) -> &BindGroupLayout {
         if !self.uniform_layouts.contains_key(&buffer_count) {
             let entries: Vec<BindGroupLayoutEntry> = (0..buffer_count)
                 .map(|i| BindGroupLayoutEntry {
@@ -156,7 +245,7 @@ impl PipelineCache {
     }
 
     /// Create a bind group from uniform buffers.
-    pub fn create_uniform_bind_group(&mut self, buffers: &[&Buffer], label: &str) -> BindGroup {
+    pub(crate) fn create_uniform_bind_group(&mut self, buffers: &[&Buffer], label: &str) -> BindGroup {
         let layout = &self.uniform_layout(buffers.len()).clone();
         let entries: Vec<BindGroupEntry> = buffers
             .iter()
@@ -175,7 +264,7 @@ impl PipelineCache {
     }
 
     /// Get or create a render pipeline.
-    pub fn get_or_create(
+    pub(crate) fn get_or_create(
         &mut self,
         shader_path: &Path,
         bind_group_layouts: &[&BindGroupLayout],
@@ -203,7 +292,7 @@ impl PipelineCache {
     }
 
     /// Reload shaders from disk. Pipelines using reloaded shaders will be recreated on next use.
-    pub fn reload_shaders(&mut self, paths: &[PathBuf]) {
+    pub(crate) fn reload_shaders(&mut self, paths: &[PathBuf]) {
         for path in paths {
             if self.shaders.contains_key(path) {
                 self.load_shader(path);
@@ -213,7 +302,7 @@ impl PipelineCache {
     }
 
     /// Clear all cached pipelines and shaders.
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.shaders.clear();
         self.pipelines.clear();
     }

@@ -1,28 +1,45 @@
 // lib.rs
-//! GPU-accelerated procedural texture generation using wgpu compute shaders.
+//! # wgpu_render_manager
 //!
-//! This crate provides utilities for generating procedural textures on the GPU,
-//! with automatic caching and mipmap generation.
+//! A helper crate for rendering and computing using `wgpu`, made specifically for game engines.
 //!
-//! ## Example
+//! It can:
+//! - Render textures to the screen for debugging and visualization purposes
+//! - Render anything using automatically procedurally generated textures
+//! - Procedurally generate textures using TextureKey and a shader
+//! - Make compute pipelines trivial using [`compute()`](compute_system::ComputeSystem::compute())
 //!
-//! ```ignore
-//! use procedural_textures::{TextureGenerator, TextureParams, ShaderSource};
+//! This crate makes game development and rendering with fullscreen passes a breeze.
 //!
-//! let mut generator = TextureGenerator::new(device, queue);
+//! ## Goals
+//! - Minimal boilerplate
+//! - Zero magic around bind groups
+//! - Easy fullscreen rendering of any texture
 //!
-//! // Register a compute shader
-//! generator.register("noise", ShaderSource::Wgsl(include_str!("noise.wgsl")));
+//! ## Shader Binding layout
+//! - `@group(0) @binding(0)`: trilinear sampler
+//! - `@group(0) @binding(0..n)`: textures as texture_2d<f32> or texture_multisampled_2d<f32>
+//! - `@group(0) @binding(n+1)`: (optional) shadow_sampler
+//! - `@group(0) @binding(n+2)`: (optional) shadow textures as texture_depth_2d_array
+//! - `@group(1) @binding(0..n)`: uniforms, in the same order as input
 //!
-//! // Generate a texture
-//! let key = TextureKey::new("noise", TextureParams::default().with_seed(42), 512);
-//! let view = generator.get_or_create(&key);
+//! ## Basic usage
+//! ```no_run
+//! // Inside a render pass
+//! render_manager.render_with_textures(
+//!     &texture_views.as_slice(), // Texture Views
+//!     shader_path.as_path(),     // Shader Path
+//!     options,                   // PipelineOptions
+//!     &[&uniforms_buffer],       // Buffers
+//!     &mut render_pass,          // Render Pass
+//! );
 //! ```
-//! Also features an automatic, extremely powerful compute pass system for textures.
+//!
+//! Used in my game [Rusty Skylines](https://github.com/maxwag9/rusty_skylines)
 
 pub mod compute_system;
 pub mod generator;
 pub mod pipelines;
 pub mod fullscreen;
 pub mod renderer;
-pub mod bind_groups;
+mod bind_groups;

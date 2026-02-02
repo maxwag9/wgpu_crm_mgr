@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use wgpu::{BindGroup, BindGroupLayout, Buffer, Device, Queue, RenderPass, TextureFormat, TextureView};
+use wgpu::{BindGroup, BindGroupLayout, Buffer, Device, Queue, RenderPass, TextureView};
 use crate::bind_groups::MaterialBindGroups;
 use crate::fullscreen::{DebugVisualization, DepthDebugParams, FullscreenRenderer};
 use crate::generator::{TextureGenerator, TextureKey};
@@ -16,7 +16,31 @@ impl UniformBindGroupKey {
 }
 
 /// High-level render manager combining texture generation, pipeline caching,
-/// and material management.
+/// material bind groups, and fullscreen debug rendering.
+///
+/// `RenderManager` is designed to remove most of the boilerplate involved in
+/// setting up render pipelines and bind groups when working with `wgpu`,
+/// while still keeping behavior explicit and predictable.
+///
+/// ## Responsibilities
+/// - Procedural texture generation via compute shaders
+/// - Render pipeline creation and caching
+/// - Automatic material bind group creation
+/// - Optional uniform bind group management
+/// - Fullscreen debug visualization of textures
+///
+/// ## What this does *not* do
+/// - It does not manage render passes or frame submission
+/// - It does not hide `wgpu` concepts like bind groups or pipelines
+/// - It does not perform draw calls for you (except fullscreen debug)
+///
+/// ## Design goals
+/// - Minimal boilerplate for common rendering paths
+/// - Explicit control over layouts and bindings
+/// - Safe reuse of pipelines and bind groups
+///
+/// Most users will interact with this type as their primary entry point
+/// into the crate.
 pub struct RenderManager {
     device: Device,
     queue: Queue,
@@ -28,9 +52,15 @@ pub struct RenderManager {
 }
 
 impl RenderManager {
-    /// Create a new render manager.
+    /// Create a new `RenderManager`.
     ///
-    /// Procedural texture shaders will be loaded from `texture_shader_dir`.
+    /// Procedural texture compute shaders will be loaded from
+    /// `texture_shader_dir`. The directory is watched logically, meaning
+    /// shaders can later be reloaded without recreating the manager.
+    ///
+    /// The provided `device` and `queue` are cloned internally and reused
+    /// by all sub-systems.
+    /// Cloning `device` and `queue` is very cheap, as they are just handles in wgpu.
     pub fn new(device: &Device, queue: &Queue, texture_shader_dir: PathBuf) -> Self {
         let generator = TextureGenerator::new(device.clone(), queue.clone(), texture_shader_dir);
         let pipeline_cache = PipelineCache::new(device.clone());
@@ -48,35 +78,80 @@ impl RenderManager {
         }
     }
 
+    /// Returns a reference to the underlying `wgpu::Device`.
     pub fn device(&self) -> &Device {
         &self.device
     }
 
+    /// Returns a reference to the underlying `wgpu::Queue`.
     pub fn queue(&self) -> &Queue {
         &self.queue
     }
 
-    /// Access the texture generator directly.
+    /// Access the procedural texture generator.
+    ///
+    /// This allows manual creation, inspection, or reuse of generated
+    /// texture views outside the high-level render APIs.
     pub fn generator(&mut self) -> &mut TextureGenerator {
         &mut self.generator
     }
 
-    /// Access the pipeline cache directly.
+    /// Access the internal render pipeline cache.
+    ///
+    /// Useful for advanced use cases such as manual pipeline preloading
+    /// or shader hot-reloading.
     pub fn pipeline_cache(&mut self) -> &mut PipelineCache {
         &mut self.pipeline_cache
     }
 
-    /// Access the fullscreen renderer directly.
+    /// Access the fullscreen debug renderer.
+    ///
+    /// This renderer is used internally by
+    /// [`render_fullscreen_debug`](Self::render_fullscreen_debug),
+    /// but can also be used directly for custom debug workflows.
     pub fn fullscreen(&mut self) -> &mut FullscreenRenderer {
         &mut self.fullscreen
     }
 
-    /// Render using procedural textures.
+    /// Render using procedurally generated textures.
     ///
-    /// Only sets up the pipeline and bind groups. Must call `pass.draw()` afterward yourself.
+    /// This method resolves textures using the internal
+    /// [`TextureGenerator`] and sets up the render pipeline
+    /// and bind groups automatically.
     ///
-    /// Textures are automatically loaded based on `texture_keys`. Each key's `shader_id`
-    /// is lowercased and `.wgsl` is appended to find the compute shader.
+    /// Only pipeline and bind groups are set.
+    /// You must call `pass.draw()` yourself.
+    ///
+    /// Uses [`render_with_textures()`](Self::render_with_textures) underneath.
+    /// ## Texture loading
+    /// Each [`TextureKey`] resolves to a compute shader where:
+    /// - `shader_id` is lowercased
+    /// - `.wgsl` is appended
+    ///
+    /// ## Parameters
+    /// - `texture_keys`: Keys describing which textures to generate or reuse
+    /// - `shader_path`: Path to the render shader
+    /// - `options`: Pipeline configuration options
+    /// - `uniforms`: Uniform buffers bound after material bindings
+    /// - `pass`: Active render pass
+    ///
+    /// ## Shader Binding layout
+    /// - `@group(0) @binding(0)`: trilinear sampler
+    /// - `@group(0) @binding(0..n)`: textures as texture_2d<f32> (Rgba8Unorm)
+    /// - `@group(0) @binding(n+1)`: (optional) shadow_sampler
+    /// - `@group(0) @binding(n+2)`: (optional) shadow textures as texture_depth_2d_array
+    /// - `@group(1) @binding(0..n)`: uniforms, in the same order as input
+    /// ## Example
+    /// ```no_run
+    /// // Inside a render pass
+    /// render_manager.render_with_textures(
+    ///     &texture_keys.as_slice(),  // Texture Keys
+    ///     shader_path.as_path(),     // Shader Path
+    ///     options,                   // Pipeline Options
+    ///     &[&uniforms_buffer],       // Buffers
+    ///     &mut render_pass,          // Render Pass
+    /// );
+    /// ```
     pub fn render(
         &mut self,
         texture_keys: &[TextureKey],
@@ -99,7 +174,35 @@ impl RenderManager {
 
     /// Render using pre-existing texture views.
     ///
-    /// Use this when you have texture views from sources other than the generator.
+    /// Use this when textures originate from sources other than the
+    /// procedural texture generator, such as render targets or external
+    /// textures.
+    ///
+    /// This method automatically:
+    /// - Creates or reuses a material bind group
+    /// - Sets up optional shadow bindings
+    /// - Handles uniform bind groups if provided
+    ///
+    /// Like [`render`](Self::render), this does not issue a draw call.
+    ///
+    /// ## Shader Binding layout
+    /// - `@group(0) @binding(0)`: trilinear sampler
+    /// - `@group(0) @binding(0..n)`: textures as texture_2d<f32> or texture_multisampled_2d<f32>
+    /// - `@group(0) @binding(n+1)`: (optional) shadow_sampler
+    /// - `@group(0) @binding(n+2)`: (optional) shadow textures as texture_depth_2d_array
+    /// - `@group(1) @binding(0..n)`: uniforms, in the same order as input
+    ///
+    /// ## Example
+    /// ```no_run
+    /// // Inside a render pass
+    /// render_manager.render_with_textures(
+    ///     &texture_views.as_slice(), // Texture Views
+    ///     shader_path.as_path(),     // Shader Path
+    ///     options,                   // Pipeline Options
+    ///     &[&uniforms_buffer],       // Buffers
+    ///     &mut render_pass,          // Render Pass
+    /// );
+    /// ```
     pub fn render_with_textures(
         &mut self,
         texture_views: &[&TextureView],
@@ -161,9 +264,13 @@ impl RenderManager {
     }
 
 
-    /// Render using custom bind group layouts.
+    /// Render using fully custom bind group layouts and bind groups.
     ///
-    /// For advanced use cases where you need full control over bind groups.
+    /// This is an advanced API intended for cases where automatic
+    /// material or uniform handling is insufficient.
+    ///
+    /// No assumptions are made about binding order or layout structure.
+    /// Bind groups are bound sequentially starting at index 0.
     pub fn render_with_layouts(
         &mut self,
         shader_path: &Path,
@@ -180,24 +287,36 @@ impl RenderManager {
         }
     }
 
-    /// Render a fullscreen debug visualization.
+    /// Render a fullscreen debug visualization of a texture.
+    ///
+    /// This is primarily intended for inspecting intermediate render
+    /// targets, depth buffers, or compute outputs.
+    ///
+    /// ## Depth
+    /// For depth texture visualizations, it is highly recommended to update the depth params using [`update_depth_params()`](Self::update_depth_params).
+    ///
     pub fn render_fullscreen_debug(
         &mut self,
         texture: &TextureView,
-        visualization: DebugVisualization,
-        target_format: TextureFormat,
-        msaa_samples: u32,
+        visualization_type: DebugVisualization,
+        target_view: &TextureView,
         pass: &mut RenderPass,
     ) {
-        self.fullscreen.render(texture, visualization, target_format, msaa_samples, pass);
+        self.fullscreen.render(texture, visualization_type, target_view, pass);
     }
 
-    /// Update depth visualization parameters.
+    /// Update parameters used for depth texture visualization.
+    ///
+    /// These parameters affect subsequent calls to
+    /// [`render_fullscreen_debug`](Self::render_fullscreen_debug).
     pub fn update_depth_params(&mut self, params: DepthDebugParams) {
         self.fullscreen.update_depth_params(params);
     }
 
-    /// Clear cached bind groups (call on window resize or texture recreation).
+    /// Clear cached material and uniform bind groups.
+    ///
+    /// Call this after window resize, swapchain recreation,
+    /// or when underlying textures are replaced.
     pub fn invalidate_bind_groups(&mut self) {
         self.materials.clear();
         self.fullscreen.invalidate_bind_groups();
@@ -205,16 +324,23 @@ impl RenderManager {
     }
 
     /// Reload render shaders from disk.
+    ///
+    /// Existing pipelines using these shaders will be recreated
+    /// on next use.
+    ///
+    /// Useful for shader hot-reloading
     pub fn reload_render_shaders(&mut self, paths: &[PathBuf]) {
         self.pipeline_cache.reload_shaders(paths);
     }
 
-    /// Reload texture generation shaders and clear texture cache.
+    /// Reload procedural texture shaders and clear the texture cache.
     pub fn reload_texture_shaders(&mut self) {
         self.generator.reload_shaders();
     }
 
-    /// Clear all caches (pipelines, textures, bind groups).
+    /// Clear all internal caches.
+    ///
+    /// This includes pipelines, generated textures, and bind groups.
     pub fn clear_all(&mut self) {
         self.pipeline_cache.clear();
         self.generator.clear_cache();
