@@ -26,7 +26,7 @@ which makes textures using compute shaders automatically and binds them automati
     compute.compute(
         "Resolve Depth",             // Label
         vec![&msaa_depth_view],      // Input Views
-        vec![&resoloved_depth_view], // Output Views
+        vec![&resolved_depth_view],  // Output Views
         shader_path,                 // Shader Path
         options,                     // ComputePipelineOptions
         &[&camera_buffer]            // Optional Buffers

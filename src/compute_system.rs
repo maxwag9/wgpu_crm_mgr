@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 use std::collections::HashMap;
 use std::fs;
+use std::path::{PathBuf};
 use wgpu::*;
 
 /// Options for compute dispatch
@@ -137,7 +138,7 @@ impl ComputeSystem {
         label: &str,
         input_views: Vec<&TextureView>,
         output_views: Vec<&TextureView>,
-        shader_path: &str,
+        shader_path: &PathBuf,
         options: ComputePipelineOptions,
         uniforms: &[&Buffer],
     ) {
@@ -155,7 +156,7 @@ impl ComputeSystem {
         let output_formats: Vec<_> = output_views.iter().map(|v| v.texture().format()).collect();
 
         let key = PipelineKey {
-            shader_path: shader_path.to_string(),
+            shader_path: shader_path.to_str().unwrap_or("").to_string(),
             input_specs: input_specs.clone(),
             output_formats: output_formats.clone(),
             uniform_count: uniforms.len(),
@@ -208,7 +209,7 @@ impl ComputeSystem {
     // compute.compute(
     //     "Resolve Depth",             // Label
     //     vec![&msaa_depth_view],      // Input Views
-    //     vec![&resoloved_depth_view], // Input Views
+    //     vec![&resolved_depth_view],  // Input Views
     //     shader_path,                 // Shader Path
     //     options,                     // ComputePipelineOptions
     //     &[&camera_buffer]            // Optional Buffers
@@ -224,16 +225,16 @@ impl ComputeSystem {
 
     fn create_pipeline(
         &self,
-        shader_path: &str,
+        shader_path: &PathBuf,
         input_specs: &[(TextureFormat, u32, bool)], // (format, sample_count, is_filterable)
         output_formats: &[TextureFormat],
         uniform_count: usize,
     ) -> CachedPipeline {
         let shader_source = fs::read_to_string(shader_path)
-            .unwrap_or_else(|_| panic!("Failed to read shader: {}", shader_path));
+            .unwrap_or_else(|_| panic!("Failed to read shader: {}", shader_path.display()));
 
         let shader = self.device.create_shader_module(ShaderModuleDescriptor {
-            label: Some(shader_path),
+            label: Some(shader_path.to_str().unwrap_or("")),
             source: ShaderSource::Wgsl(shader_source.into()),
         });
 
@@ -348,7 +349,7 @@ impl ComputeSystem {
         let pipeline = self
             .device
             .create_compute_pipeline(&ComputePipelineDescriptor {
-                label: Some(shader_path),
+                label: Some(shader_path.to_str().unwrap_or("")),
                 layout: Some(&pipeline_layout),
                 module: &shader,
                 entry_point: Some("main"),
@@ -469,8 +470,9 @@ impl ComputeSystem {
 }
 pub(crate) fn figure_out_aspect(format: TextureFormat) -> Option<TextureAspect> {
     if format.has_depth_aspect() && format.has_stencil_aspect() {
-        panic!("Fullscreen Debug Render received a Depth texture with both Depth aspect and Stencil aspect, which wgpu doesn't allow to be used in shaders together. \n \n \
-        Solution: Make another view of the same texture with TextureAspect::DepthOnly and pass that in instead. \n")
+        None
+        // panic!("Fullscreen Debug Render received a Depth texture with both Depth aspect and Stencil aspect, which wgpu doesn't allow to be used in shaders together. \n \n \
+        // Solution: Make another view of the same texture with TextureAspect::DepthOnly and pass that in instead. \n")
     } else if format.has_depth_aspect() {
         Some(TextureAspect::DepthOnly)
     } else if format.has_stencil_aspect() {

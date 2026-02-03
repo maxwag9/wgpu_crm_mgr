@@ -349,6 +349,98 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(v, v, v, 1.0);
 }
 "#;
+const FULLSCREEN_LINEAR_DEPTH_SHADER: &str = r#"
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+struct DepthParams {
+    near: f32,
+    far: f32,
+    power: f32,
+    reversed_z: u32,
+};
+
+@group(0) @binding(0) var s_tex: sampler;
+@group(0) @binding(1) var t_tex: texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params: DepthParams;
+
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    var uvs = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+    );
+    var out: VertexOutput;
+    out.position = vec4<f32>(positions[idx], 0.0, 1.0);
+    out.uv = uvs[idx];
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let linear_z = textureSample(t_tex, s_tex, in.uv).r;
+    let v01 = 1.0 - clamp(linear_z / params.far, 0.0, 1.0);
+    let v = pow(v01, params.power);
+    return vec4<f32>(v, v, v, 1.0);
+}
+"#;
+
+const FULLSCREEN_LINEAR_DEPTH_UNFILTERABLE_SHADER: &str = r#"
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+struct DepthParams {
+    near: f32,
+    far: f32,
+    power: f32,
+    reversed_z: u32,
+};
+
+@group(0) @binding(0) var t_tex: texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params: DepthParams;
+
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    var uvs = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+    );
+    var out: VertexOutput;
+    out.position = vec4<f32>(positions[idx], 0.0, 1.0);
+    out.uv = uvs[idx];
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let dims = textureDimensions(t_tex);
+    let coord = vec2<i32>(in.uv * vec2<f32>(dims));
+    let linear_z = textureLoad(t_tex, coord, 0).r;
+    let v01 = 1.0 - clamp(linear_z / params.far, 0.0, 1.0);
+    let v = pow(v01, params.power);
+    return vec4<f32>(v, v, v, 1.0);
+}
+"#;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct DepthDebugParams {
@@ -365,6 +457,7 @@ pub enum DebugVisualization {
     Color,
     RedToGrayscale,
     Depth,
+    LinearDepth, // NEW: for already-linearized depth in float textures
 }
 
 #[repr(C)]
@@ -381,6 +474,7 @@ enum PipelineKind {
     Color,
     RedToGrayscale,
     Depth,
+    LinearDepth,
 }
 
 impl PipelineKind {
@@ -388,7 +482,8 @@ impl PipelineKind {
         match visualization {
             DebugVisualization::Color => Self::Color,
             DebugVisualization::RedToGrayscale => Self::RedToGrayscale,
-            DebugVisualization::Depth => Self::Depth
+            DebugVisualization::Depth => Self::Depth,
+            DebugVisualization::LinearDepth => Self::LinearDepth,
         }
     }
 }
@@ -422,6 +517,8 @@ pub struct FullscreenRenderer {
     red_to_grayscale_msaa_shader: ShaderModule,
     depth_shader: ShaderModule,
     depth_msaa_shader: ShaderModule,
+    linear_depth_shader: ShaderModule,
+    linear_depth_unfilterable_shader: ShaderModule,
 
     color_bgl: BindGroupLayout,
     color_unfilterable_bgl: BindGroupLayout,
@@ -487,6 +584,15 @@ impl FullscreenRenderer {
             label: Some("fullscreen depth MSAA shader"),
             source: ShaderSource::Wgsl(FULLSCREEN_DEPTH_MSAA_SHADER.into()),
         });
+        let linear_depth_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("fullscreen linear depth shader"),
+            source: ShaderSource::Wgsl(FULLSCREEN_LINEAR_DEPTH_SHADER.into()),
+        });
+        let linear_depth_unfilterable_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("fullscreen linear depth unfilterable shader"),
+            source: ShaderSource::Wgsl(FULLSCREEN_LINEAR_DEPTH_UNFILTERABLE_SHADER.into()),
+        });
+
         let color_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("fullscreen color bgl"),
             entries: &[
@@ -603,6 +709,8 @@ impl FullscreenRenderer {
             red_to_grayscale_msaa_shader,
             depth_shader,
             depth_msaa_shader,
+            linear_depth_shader,
+            linear_depth_unfilterable_shader,
             color_bgl,
             color_unfilterable_bgl,
             color_msaa_bgl,
@@ -665,13 +773,14 @@ impl FullscreenRenderer {
         target_view: &TextureView,
         pass: &mut RenderPass,
     ) {
-        //texture.texture().
         let binding_type = infer_texture_binding_type(texture, &self.device);
         let sample_type = match binding_type {
             BindingType::Texture { sample_type, .. } => sample_type,
             _ => unreachable!("infer_texture_binding_type always returns BindingType::Texture"),
         };
 
+        // Auto-detect depth texture and override kind if needed
+        // But don't override if user explicitly requested LinearDepth
         let kind = if matches!(sample_type, TextureSampleType::Depth) {
             PipelineKind::Depth
         } else {
@@ -689,7 +798,8 @@ impl FullscreenRenderer {
         let bind_group = self.get_or_create_bind_group(texture, kind, is_filterable);
         pass.set_bind_group(0, bind_group, &[]);
 
-        if kind == PipelineKind::Depth {
+        // LinearDepth also needs depth params for normalization
+        if kind == PipelineKind::Depth || kind == PipelineKind::LinearDepth {
             if let Some(bg) = &self.depth_params_bind_group {
                 pass.set_bind_group(1, bg, &[]);
             }
@@ -765,20 +875,24 @@ impl FullscreenRenderer {
             (PipelineKind::Color, true, _) => (&self.color_msaa_shader, &self.color_msaa_bgl),
             (PipelineKind::RedToGrayscale, true, _) => (&self.red_to_grayscale_msaa_shader, &self.color_msaa_bgl),
             (PipelineKind::Depth, true, _) => (&self.depth_msaa_shader, &self.depth_msaa_bgl),
+            (PipelineKind::LinearDepth, true, _) => (&self.color_msaa_shader, &self.color_msaa_bgl), // MSAA linear depth unlikely, fallback to color
 
             // Non-MSAA filterable float textures use sampler-based shaders
             (PipelineKind::Color, false, true) => (&self.color_shader, &self.color_bgl),
             (PipelineKind::RedToGrayscale, false, true) => (&self.red_to_grayscale_shader, &self.color_bgl),
+            (PipelineKind::LinearDepth, false, true) => (&self.linear_depth_shader, &self.color_bgl),
 
             // Non-MSAA non-filterable float textures use textureLoad shaders
             (PipelineKind::Color, false, false) => (&self.color_unfilterable_shader, &self.color_unfilterable_bgl),
             (PipelineKind::RedToGrayscale, false, false) => (&self.red_to_grayscale_unfilterable_shader, &self.color_unfilterable_bgl),
+            (PipelineKind::LinearDepth, false, false) => (&self.linear_depth_unfilterable_shader, &self.color_unfilterable_bgl),
 
             // Depth textures (non-MSAA) use their own sampler-based shader
             (PipelineKind::Depth, false, _) => (&self.depth_shader, &self.depth_bgl),
         };
 
-        let bind_group_layouts: Vec<&BindGroupLayout> = if kind == PipelineKind::Depth {
+        // LinearDepth also needs depth_params_bgl for the far plane value
+        let bind_group_layouts: Vec<&BindGroupLayout> = if kind == PipelineKind::Depth || kind == PipelineKind::LinearDepth {
             vec![bgl, &self.depth_params_bgl]
         } else {
             vec![bgl]
@@ -841,7 +955,7 @@ impl FullscreenRenderer {
         if !self.bind_groups.contains_key(&key) {
             let bg = match (kind, is_msaa, is_filterable) {
                 // MSAA textures: no sampler, just texture at binding 0
-                (PipelineKind::Color | PipelineKind::RedToGrayscale, true, _) => {
+                (PipelineKind::Color | PipelineKind::RedToGrayscale | PipelineKind::LinearDepth, true, _) => {
                     self.device.create_bind_group(&BindGroupDescriptor {
                         label: Some("Fullscreen Color MSAA Bind Group"),
                         layout: &self.color_msaa_bgl,
@@ -863,7 +977,7 @@ impl FullscreenRenderer {
                 }
 
                 // Non-MSAA unfilterable: no sampler, just texture at binding 0
-                (PipelineKind::Color | PipelineKind::RedToGrayscale, false, false) => {
+                (PipelineKind::Color | PipelineKind::RedToGrayscale | PipelineKind::LinearDepth, false, false) => {
                     self.device.create_bind_group(&BindGroupDescriptor {
                         label: Some("Fullscreen Color Unfilterable Bind Group"),
                         layout: &self.color_unfilterable_bgl,
@@ -875,7 +989,7 @@ impl FullscreenRenderer {
                 }
 
                 // Non-MSAA filterable: sampler + texture
-                (PipelineKind::Color | PipelineKind::RedToGrayscale, false, true) => {
+                (PipelineKind::Color | PipelineKind::RedToGrayscale | PipelineKind::LinearDepth, false, true) => {
                     self.device.create_bind_group(&BindGroupDescriptor {
                         label: Some("Fullscreen Color Bind Group"),
                         layout: &self.color_bgl,
