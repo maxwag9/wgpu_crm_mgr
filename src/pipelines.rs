@@ -1,7 +1,7 @@
 // pipelines.rs
 #![allow(dead_code)]
 use std::collections::{HashMap};
-use std::hash::{BuildHasher, DefaultHasher, Hash, Hasher};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use wgpu::*;
 use crate::shader_preprocessing::compile_wgsl;
@@ -287,7 +287,7 @@ impl PipelineCache {
             depth_stencil: options.depth_stencil.as_ref().map(|d| d.into()),
             cull_mode: options.cull_mode,
             depth_only: options.vertex_only,
-            defines_hash: defines.hasher().build_hasher().finish()
+            defines_hash: hash_defines(defines)
         };
 
         if !self.pipelines.contains_key(&key) {
@@ -304,7 +304,7 @@ impl PipelineCache {
         for path in paths {
             let shader_key = ShaderKey {
                 shader_path: path.clone(),
-                defines_hash: defines.hasher().build_hasher().finish()
+                defines_hash: hash_defines(defines)
             };
             if self.shaders.contains_key(&shader_key) {
                 self.load_shader(path, defines);
@@ -322,7 +322,7 @@ impl PipelineCache {
     fn load_shader(&mut self, path: &Path, defines: &HashMap<String, bool>) {
         let shader_key = ShaderKey {
             shader_path: path.to_path_buf(),
-            defines_hash: defines.hasher().build_hasher().finish()
+            defines_hash: hash_defines(defines)
         };
         if self.shaders.contains_key(&shader_key) {
             return;
@@ -340,7 +340,7 @@ impl PipelineCache {
     ) -> RenderPipeline {
         let shader_key = ShaderKey {
             shader_path: key.shader_path.clone(),
-            defines_hash: defines.hasher().build_hasher().finish()
+            defines_hash: hash_defines(defines)
         };
         let shader = &self.shaders.get(&shader_key).unwrap().module;
 
@@ -400,6 +400,19 @@ fn hash_layouts(bgls: &[&BindGroupLayout], vertex_layouts: &[VertexBufferLayout]
     }
     for vl in vertex_layouts {
         vl.hash(&mut hasher); // stable: hashes the wgpu id, not the stack address IMPORTANT, would be an *INSANE* bug!
+    }
+    hasher.finish()
+}
+pub fn hash_defines(defines: &HashMap<String, bool>) -> u64 { // stable: hashes the values as well, or else shaders wouldn't be updated on change!
+    // Use a small stack vec for sorting keys
+    let mut keys: Vec<_> = defines.keys().collect();
+    keys.sort_unstable(); // faster than stable sort
+
+    let mut hasher = DefaultHasher::new();
+    for k in keys {
+        k.hash(&mut hasher);
+        // unwrap is safe because key exists in the map
+        defines.get(k).unwrap().hash(&mut hasher);
     }
     hasher.finish()
 }

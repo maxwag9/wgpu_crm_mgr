@@ -1,9 +1,9 @@
 // compute_system.rs
 #![allow(dead_code)]
 use std::collections::{HashMap};
-use std::hash::{BuildHasher, Hasher};
 use std::path::{PathBuf};
 use wgpu::*;
+use crate::pipelines::hash_defines;
 use crate::shader_preprocessing::compile_wgsl;
 
 /// Options for compute dispatch
@@ -178,7 +178,7 @@ impl ComputeSystem {
             input_specs: input_specs.clone(),
             output_formats: output_formats.clone(),
             buffer_bindings: buffer_bindings.clone(),
-            defines_hash: defines.hasher().build_hasher().finish(),
+            defines_hash: hash_defines(defines)
         };
 
         // Get or create cached pipeline
@@ -261,6 +261,8 @@ impl ComputeSystem {
     //     pass                         // Your own pass!
     // );
 
+
+
     fn create_pipeline(
         &self,
         shader_path: &PathBuf,
@@ -271,24 +273,28 @@ impl ComputeSystem {
     ) -> CachedPipeline {
         let shader = compile_wgsl(&self.device, shader_path, defines);
 
-        // Determine if we can use filtering sampler
-        let use_filtering = input_specs.iter().all(|(format, sample_count, is_filterable)| {
-            format.has_depth_aspect() || *sample_count > 1 || *is_filterable
+        // Identify textures that can actually use a sampler (non-integer, non-multisampled)
+        let samplable_textures: Vec<_> = input_specs
+            .iter()
+            .filter(|(format, sample_count, _)| {
+                !is_integer_format(*format) && *sample_count == 1
+            })
+            .collect();
+
+        // Can only use filtering if ALL samplable textures support it
+        let use_filtering = samplable_textures.is_empty()
+            || samplable_textures.iter().all(|(format, _, is_filterable)| {
+            // Depth textures use comparison samplers, so they don't affect filtering choice
+            format.has_depth_aspect() || *is_filterable
         });
 
-        // Group 0: inputs + sampler
+        // Group 0: input textures + sampler
         let mut input_entries: Vec<BindGroupLayoutEntry> = input_specs
             .iter()
             .enumerate()
             .map(|(i, (format, sample_count, is_filterable))| {
                 let multisampled = *sample_count > 1;
-                let sample_type = if format.has_depth_aspect() {
-                    TextureSampleType::Depth
-                } else {
-                    TextureSampleType::Float {
-                        filterable: *is_filterable && !multisampled,
-                    }
-                };
+                let sample_type = get_texture_sample_type(*format, *is_filterable, multisampled);
 
                 BindGroupLayoutEntry {
                     binding: i as u32,
@@ -303,6 +309,7 @@ impl ComputeSystem {
             })
             .collect();
 
+        // Add sampler if there are any inputs (even if not used, shader might expect it)
         if !input_specs.is_empty() {
             let sampler_type = if use_filtering {
                 SamplerBindingType::Filtering
@@ -325,19 +332,30 @@ impl ComputeSystem {
                 entries: &input_entries,
             });
 
-        // Group 1: outputs
+        // Group 1: output storage textures
         let output_entries: Vec<BindGroupLayoutEntry> = output_formats
             .iter()
             .enumerate()
-            .map(|(i, format)| BindGroupLayoutEntry {
-                binding: i as u32,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::StorageTexture {
-                    access: StorageTextureAccess::WriteOnly,
-                    format: *format,
-                    view_dimension: TextureViewDimension::D2,
-                },
-                count: None,
+            .map(|(i, format)| {
+                // Warn if format might not support storage
+                #[cfg(debug_assertions)]
+                if !is_storage_compatible(*format) {
+                    eprintln!(
+                        "Warning: Format {:?} may not be supported as a storage texture",
+                        format
+                    );
+                }
+
+                BindGroupLayoutEntry {
+                    binding: i as u32,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: *format,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                    count: None,
+                }
             })
             .collect();
 
@@ -364,12 +382,12 @@ impl ComputeSystem {
             })
             .collect();
 
-        let buffer_layout = self.device.create_bind_group_layout(
-            &BindGroupLayoutDescriptor {
+        let buffer_layout = self
+            .device
+            .create_bind_group_layout(&BindGroupLayoutDescriptor {
                 label: Some("compute_buffer_layout"),
                 entries: &buffer_entries,
-            },
-        );
+            });
 
         let bind_group_layouts = [input_layout, output_layout, buffer_layout];
 
@@ -531,4 +549,74 @@ fn buffer_binding_type(buffer_set: &BufferSet) -> BufferBindingType {
             usage
         );
     }
+}
+/// Determines the correct TextureSampleType for any format
+fn get_texture_sample_type(
+    format: TextureFormat,
+    is_filterable: bool,
+    multisampled: bool,
+) -> TextureSampleType {
+    use wgpu::TextureFormat::*;
+
+    // Handle depth formats first
+    if format.has_depth_aspect() {
+        return TextureSampleType::Depth;
+    }
+
+    match format {
+        // Stencil-only format
+        Stencil8 => TextureSampleType::Uint,
+
+        // Unsigned integer formats
+        R8Uint | R16Uint | R32Uint
+        | Rg8Uint | Rg16Uint | Rg32Uint
+        | Rgba8Uint | Rgba16Uint | Rgba32Uint
+        | Rgb10a2Uint => TextureSampleType::Uint,
+
+        // Signed integer formats
+        R8Sint | R16Sint | R32Sint
+        | Rg8Sint | Rg16Sint | Rg32Sint
+        | Rgba8Sint | Rgba16Sint | Rgba32Sint => TextureSampleType::Sint,
+
+        // All other formats are float-compatible (Unorm, Snorm, Float, Srgb, etc.)
+        _ => TextureSampleType::Float {
+            filterable: is_filterable && !multisampled,
+        },
+    }
+}
+
+/// Check if format is an integer format (cannot use texture sampling, only textureLoad)
+fn is_integer_format(format: TextureFormat) -> bool {
+    use wgpu::TextureFormat::*;
+    matches!(
+            format,
+            R8Uint | R16Uint | R32Uint
+            | Rg8Uint | Rg16Uint | Rg32Uint
+            | Rgba8Uint | Rgba16Uint | Rgba32Uint
+            | Rgb10a2Uint
+            | R8Sint | R16Sint | R32Sint
+            | Rg8Sint | Rg16Sint | Rg32Sint
+            | Rgba8Sint | Rgba16Sint | Rgba32Sint
+            | Stencil8
+        )
+}
+
+/// Check if format can be used as a storage texture (output)
+fn is_storage_compatible(format: TextureFormat) -> bool {
+    use wgpu::TextureFormat::*;
+    matches!(
+            format,
+            // Core storage formats (always supported)
+            R32Float | R32Uint | R32Sint
+            | Rg32Float | Rg32Uint | Rg32Sint
+            | Rgba8Unorm | Rgba8Snorm | Rgba8Uint | Rgba8Sint
+            | Rgba16Float | Rgba16Uint | Rgba16Sint
+            | Rgba32Float | Rgba32Uint | Rgba32Sint
+            // Extended formats (may require features, but let wgpu validate)
+            | R16Float | Rg16Float
+            | R8Unorm | Rg8Unorm
+            | R8Uint | R8Sint | Rg8Uint | Rg8Sint
+            | R16Uint | R16Sint | Rg16Uint | Rg16Sint
+            | Bgra8Unorm
+        )
 }
